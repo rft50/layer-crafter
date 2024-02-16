@@ -5,12 +5,16 @@ import { createReset } from "../../features/reset";
 import { createLayerTreeNode } from "../common";
 import { addTooltip } from "../../features/tooltips/tooltip";
 import { createResourceTooltip } from "../../features/trees/tree";
-import { jsx } from "../../features/feature";
+import { CoercableComponent, jsx } from "../../features/feature";
 import MainDisplay from "../../features/resources/MainDisplay.vue";
 import { createRepeatable, GenericRepeatable, RepeatableOptions } from "../../features/repeatable";
-import { createCostRequirement, displayRequirements } from "../../game/requirements";
+import {
+    CostRequirement,
+    createCostRequirement,
+    displayRequirements
+} from "../../game/requirements";
 import { computed, effect, ref, Ref, unref } from "vue";
-import { render } from "../../util/vue";
+import { joinJSX, render, renderRow } from "../../util/vue";
 import { noPersist, persistent } from "../../game/persistence";
 import {
     bonusAmountDecorator,
@@ -30,6 +34,10 @@ import {
     GenericEffectFeature
 } from "../../features/decorators/common";
 import { createUpgrade, GenericUpgrade, UpgradeOptions } from "../../features/upgrades/upgrade";
+import { ProcessedComputable } from "../../util/computed";
+import { chunkArray } from "../../util";
+import ChunkedRenderRow from "../../components/custom/ChunkedRenderRow.vue";
+import upgrade from "../../features/upgrades/Upgrade.vue";
 
 type LayerBuildData = {
     position: number;
@@ -54,13 +62,27 @@ type CascadeStructureOptions = RepeatableOptions &
         bonusAmountRaw: Ref<DecimalSource>;
     };
 
-type CascadeUpgrade = GenericUpgrade & GenericEffectFeature<DecimalSource>;
+// appliesTo is an index for a given C, -1 for all boost, and undefined for nothing
 
-type CascadeUpgradeOptions = UpgradeOptions & EffectFeatureOptions<DecimalSource>;
+type CascadeUpgrade = GenericUpgrade &
+    GenericEffectFeature<DecimalSource> & {
+        appliesTo: number | undefined;
+    };
 
-type CascadeRepeatable = GenericRepeatable & GenericEffectFeature<DecimalSource>;
+type CascadeUpgradeOptions = UpgradeOptions &
+    EffectFeatureOptions<DecimalSource> & {
+        appliesTo: number | undefined;
+    };
 
-type CascadeRepeatableOptions = RepeatableOptions & EffectFeatureOptions<DecimalSource>;
+type CascadeRepeatable = GenericRepeatable &
+    GenericEffectFeature<DecimalSource> & {
+        appliesTo: number | undefined;
+    };
+
+type CascadeRepeatableOptions = RepeatableOptions &
+    EffectFeatureOptions<DecimalSource> & {
+        appliesTo: number | undefined;
+    };
 
 const structureData: CascadeStructureData[] = [
     {
@@ -102,21 +124,32 @@ const createCascade = function (data: LayerBuildData) {
             pinnable: true
         });
 
+        function cascadeRequirement(
+            data: { baseCost: DecimalSource; scaling: DecimalSource },
+            obj: { amount: ProcessedComputable<DecimalSource> }
+        ): CostRequirement {
+            return createCostRequirement(() => ({
+                cost: computed(() => {
+                    return Decimal.mul(data.baseCost, Decimal.pow(data.scaling, unref(obj.amount)));
+                }),
+                resource: noPersist(points)
+            }));
+        }
+
+        const allBoostModifiers: Modifier[] = [];
+        const allBoostModifierRaw = createSequentialModifier(() => allBoostModifiers);
+        const allBoostModifier = createMultiplicativeModifier(() => ({
+            multiplier: computed(() => allBoostModifierRaw.apply(1)),
+            description: "All Boost"
+        }));
+
         const structures: CascadeStructure[] = [];
         const modifiers: Modifier[][] = [];
         for (let i = 0; i < structureData.length; i++) {
             const data = structureData[i];
             structures[i] = createRepeatable<CascadeStructureOptions>(
                 obj => ({
-                    requirements: createCostRequirement(() => ({
-                        cost: computed(() => {
-                            return Decimal.mul(
-                                data.baseCost,
-                                Decimal.pow(data.scaling, unref(obj.amount))
-                            );
-                        }),
-                        resource: noPersist(points)
-                    })),
+                    requirements: cascadeRequirement(data, obj),
                     display: jsx(() => (
                         <>
                             {id + "-" + i}
@@ -131,7 +164,9 @@ const createCascade = function (data: LayerBuildData) {
                         </>
                     )),
                     bonusAmountRaw: persistent(0),
-                    bonusAmount: computed(() => (obj as unknown as CascadeStructure).bonusAmountRaw.value),
+                    bonusAmount: computed(
+                        () => (obj as unknown as CascadeStructure).bonusAmountRaw.value
+                    )
                 }),
                 bonusAmountDecorator
             ) as unknown as CascadeStructure;
@@ -139,7 +174,8 @@ const createCascade = function (data: LayerBuildData) {
                 createMultiplicativeModifier(() => ({
                     multiplier: structures[i].totalAmount,
                     description: () => "Structure Count"
-                }))
+                })),
+                allBoostModifier
             ];
         }
 
@@ -161,21 +197,129 @@ const createCascade = function (data: LayerBuildData) {
                                 {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
                             </>
                         ))
-                    }
+                    },
+                    appliesTo: 0
+                }),
+                effectDecorator
+            ) as unknown as CascadeUpgrade,
+            spec1: createUpgrade<CascadeUpgradeOptions>(
+                upgrade => ({
+                    requirements: createCostRequirement(() => ({
+                        cost: 1e5,
+                        resource: noPersist(points)
+                    })),
+                    effect: () => {
+                        return 2;
+                    },
+                    display: {
+                        title: "Spectrum 1",
+                        description: "All production on this layer is doubled",
+                        effectDisplay: jsx(() => (
+                            <>
+                                {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
+                            </>
+                        ))
+                    },
+                    appliesTo: -1
+                }),
+                effectDecorator
+            ) as unknown as CascadeUpgrade,
+            res1: createUpgrade<CascadeUpgradeOptions>(
+                upgrade => ({
+                    requirements: createCostRequirement(() => ({
+                        cost: 2e7,
+                        resource: noPersist(points)
+                    })),
+                    effect: () => {
+                        return Decimal.pow(1.08, unref(structures[1].amount));
+                    },
+                    display: {
+                        title: "Resonance 1",
+                        description: "Purchased C-1 boost themselves by 1.08x",
+                        effectDisplay: jsx(() => (
+                            <>
+                                {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
+                            </>
+                        ))
+                    },
+                    appliesTo: 1
+                }),
+                effectDecorator
+            ) as unknown as CascadeUpgrade,
+            cond0: createUpgrade<CascadeUpgradeOptions>(
+                upgrade => ({
+                    requirements: createCostRequirement(() => ({
+                        cost: 1e13,
+                        resource: noPersist(points)
+                    })),
+                    effect: () => {
+                        return Decimal.add(10, unref(structures[0].totalAmount)).log10();
+                    },
+                    display: {
+                        title: "Condense 0",
+                        description: "Boost C-0 by log10 of C-0",
+                        effectDisplay: jsx(() => (
+                            <>
+                                {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
+                            </>
+                        ))
+                    },
+                    appliesTo: 0
+                }),
+                effectDecorator
+            ) as unknown as CascadeUpgrade,
+            res2: createUpgrade<CascadeUpgradeOptions>(
+                upgrade => ({
+                    requirements: createCostRequirement(() => ({
+                        cost: 2e16,
+                        resource: noPersist(points)
+                    })),
+                    effect: () => {
+                        return Decimal.pow(1.06, unref(structures[2].amount));
+                    },
+                    display: {
+                        title: "Resonance 2",
+                        description: "Purchased C-2 boost themselves by 1.06x",
+                        effectDisplay: jsx(() => (
+                            <>
+                                {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
+                            </>
+                        ))
+                    },
+                    appliesTo: 2
+                }),
+                effectDecorator
+            ) as unknown as CascadeUpgrade,
+            spec2: createUpgrade<CascadeUpgradeOptions>(
+                upgrade => ({
+                    requirements: createCostRequirement(() => ({
+                        cost: 1e21,
+                        resource: noPersist(points)
+                    })),
+                    effect: () => {
+                        return 2;
+                    },
+                    display: {
+                        title: "Spectrum 2",
+                        description: "All production on this layer is doubled",
+                        effectDisplay: jsx(() => (
+                            <>
+                                {format(unref((upgrade as unknown as CascadeUpgrade).effect)) + "x"}
+                            </>
+                        ))
+                    },
+                    appliesTo: -1
                 }),
                 effectDecorator
             ) as unknown as CascadeUpgrade
         };
 
+        const upgradeOrder = Object.values(upgrades);
+
         const repeatables: CascadeRepeatable[] = [
             createRepeatable<CascadeRepeatableOptions>(
                 rep => ({
-                    requirements: createCostRequirement(() => ({
-                        cost: computed(() => {
-                            return Decimal.mul(100, Decimal.pow(100, unref(rep.amount)));
-                        }),
-                        resource: noPersist(points)
-                    })),
+                    requirements: cascadeRequirement({ baseCost: 100, scaling: 100 }, rep),
                     effect: () => {
                         return Decimal.pow(3, unref(rep.amount));
                     },
@@ -186,41 +330,87 @@ const createCascade = function (data: LayerBuildData) {
                             <>{format(unref((rep as unknown as CascadeUpgrade).effect)) + "x"}</>
                         ))
                     },
-                    limit: 5
+                    limit: 5,
+                    appliesTo: 0
+                }),
+                effectDecorator
+            ) as unknown as CascadeRepeatable,
+            createRepeatable<CascadeRepeatableOptions>(
+                rep => ({
+                    requirements: cascadeRequirement({ baseCost: 1e9, scaling: 1000 }, rep),
+                    effect: () => {
+                        return Decimal.pow(2, unref(rep.amount));
+                    },
+                    display: {
+                        title: "CR-1",
+                        description: "2x C-0 production per level",
+                        effectDisplay: jsx(() => (
+                            <>{format(unref((rep as unknown as CascadeUpgrade).effect)) + "x"}</>
+                        ))
+                    },
+                    limit: 3,
+                    appliesTo: 0
+                }),
+                effectDecorator
+            ) as unknown as CascadeRepeatable,
+            createRepeatable<CascadeRepeatableOptions>(
+                rep => ({
+                    requirements: cascadeRequirement({ baseCost: 1e16, scaling: 1e4 }, rep),
+                    effect: () => {
+                        return Decimal.pow(2, unref(rep.amount));
+                    },
+                    display: {
+                        title: "CR-2",
+                        description: "2x C-1 production per level",
+                        effectDisplay: jsx(() => (
+                            <>{format(unref((rep as unknown as CascadeUpgrade).effect)) + "x"}</>
+                        ))
+                    },
+                    limit: 3,
+                    appliesTo: 1
                 }),
                 effectDecorator
             ) as unknown as CascadeRepeatable
         ];
 
-        const allBoostModifiers: Modifier[] = [
-            createMultiplicativeModifier(() => ({
-                multiplier: 2,
-                enabled: () => Decimal.gt(unref(repeatables[0].amount), 0),
-                description: "Spectrum 1"
-            }))
-        ];
-        const allBoostModifier = createSequentialModifier(() => allBoostModifiers);
-
         const sequentialModifiers: WithRequired<Modifier, "description">[] = [];
         for (let i = 0; i < modifiers.length; i++) {
-            modifiers[i].push(allBoostModifier);
             sequentialModifiers[i] = createSequentialModifier(() => modifiers[i]);
         }
 
-        modifiers[0].push(
-            createMultiplicativeModifier(() => ({
-                multiplier: upgrades.res0?.effect,
-                enabled: upgrades.res0?.bought,
-                description: "Resonance 0"
-            }))
-        );
-        modifiers[0].push(
-            createMultiplicativeModifier(() => ({
-                multiplier: repeatables[0].effect,
-                enabled: () => Decimal.gt(unref(repeatables[0].amount), 0),
-                description: "CR-0"
-            }))
-        );
+        for (const upgrade of upgradeOrder) {
+            const applyTo = upgrade.appliesTo;
+            if (applyTo === undefined) {
+                continue;
+            }
+            const modifier = createMultiplicativeModifier(() => ({
+                multiplier: upgrade.effect,
+                description: (upgrade.display as unknown as { title: CoercableComponent }).title,
+                enabled: upgrade.bought
+            }));
+            if (applyTo === -1) {
+                allBoostModifiers.push(modifier);
+            } else {
+                modifiers[applyTo].push(modifier);
+            }
+        }
+
+        for (const repeatable of repeatables) {
+            const applyTo = repeatable.appliesTo;
+            if (applyTo === undefined) {
+                continue;
+            }
+            const modifier = createMultiplicativeModifier(() => ({
+                multiplier: repeatable.effect,
+                description: (repeatable.display as unknown as { title: CoercableComponent }).title,
+                enabled: () => Decimal.gt(unref(repeatable.amount), 0)
+            }));
+            if (applyTo === -1) {
+                allBoostModifiers.push(modifier);
+            } else {
+                modifiers[applyTo].push(modifier);
+            }
+        }
 
         this.on("update", diff => {
             points.value = Decimal.add(points.value, sequentialModifiers[0].apply(diff));
@@ -232,17 +422,20 @@ const createCascade = function (data: LayerBuildData) {
             }
         });
 
+        const str = chunkArray(upgradeOrder, 5).map(arr => renderRow(...arr));
+
         return {
             name,
             color,
             points,
             tooltip,
+            //<ChunkedRenderRow components={upgradeOrder} chunkSize={5} />
             display: jsx(() => (
                 <>
                     <MainDisplay resource={points} color={color} />
-                    {render(upgrades.res0)}
+                    {str}
                     <br />
-                    {render(repeatables[0])}
+                    {renderRow(...repeatables)}
                     <br />
                     {render(structures[0])}
                     <br />
@@ -252,7 +445,7 @@ const createCascade = function (data: LayerBuildData) {
                     <br />
                     {createModifierSection({
                         title: "All Boost",
-                        modifier: allBoostModifier
+                        modifier: allBoostModifierRaw
                     })}
                     <br />
                     {createModifierSection({
@@ -264,6 +457,11 @@ const createCascade = function (data: LayerBuildData) {
                         title: "C-1 Production",
                         modifier: sequentialModifiers[1]
                     })}
+                    <br />
+                    {createModifierSection({
+                        title: "C-2 Production",
+                        modifier: sequentialModifiers[2]
+                    })}
                 </>
             )),
             treeNode,
@@ -274,8 +472,5 @@ const createCascade = function (data: LayerBuildData) {
     });
     return layer;
 };
-
-// function createCascadeStructure(data: CascadeStructureOptions): CascadeStructure {
-// }
 
 export default createCascade;
