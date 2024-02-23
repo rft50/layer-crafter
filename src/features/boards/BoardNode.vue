@@ -110,6 +110,20 @@
                     :stroke="progressColor"
                 />
             </g>
+            <ChainStart
+                v-else-if="shape === Shape.ChainStart"
+                :size="size"
+                :fillColor="fillColor"
+                :strokeColor="outlineColor"
+                :node="node"
+            />
+            <ChainBody
+                v-else-if="shape === Shape.ChainBody"
+                :size="size"
+                :fillColor="fillColor"
+                :strokeColor="outlineColor"
+                :data="node.state as PartData"
+            />
 
             <text :fill="titleColor" class="node-title">{{ title }}</text>
         </g>
@@ -147,6 +161,9 @@ import { isVisible } from "features/feature";
 import settings from "game/settings";
 import { CSSProperties, computed, toRefs, unref, watch } from "vue";
 import BoardNodeAction from "./BoardNodeAction.vue";
+import ChainStart from "../../components/custom/ChainStart.vue";
+import ChainBody from "../../components/custom/ChainBody.vue";
+import { PartData } from "../../data/util";
 
 const sqrtTwo = Math.sqrt(2);
 

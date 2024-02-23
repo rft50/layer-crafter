@@ -8,18 +8,21 @@ import { format, formatTime } from "util/bignum";
 import { render } from "util/vue";
 import { computed, unref } from "vue";
 import { BoardNode, BoardNodeLink, createBoard, Shape } from "../features/boards/board";
-import { getNode } from "./util";
+import { CraftedLayer, getNode, PartData } from "./util";
 import createCascade from "./layers/cascade";
 
-type BuilderState = {
+export type BuilderState = {
     active: boolean;
     linked: number[];
 };
 
-type LayerState = {
+export type LayerState = {
     type: string;
-    layerId: string | null;
+    layerId?: string;
+    parts: PartData[];
 };
+
+export type PartState = PartData;
 
 /**
  * @hidden
@@ -48,18 +51,19 @@ export const main = createLayer("main", function (this: BaseLayer) {
                         id: "build",
                         onClick: builder => {
                             const state = builder.state as BuilderState;
-                            const linked = state.linked
+                            const linked = state.linked;
                             if (!state.active && linked.length > 0) {
                                 // build the stuff
                                 state.active = true;
+                                const genLayers: CraftedLayer[] = [];
                                 for (let i = 0; i < linked.length; i++) {
                                     const node = getNode(board, linked[i]);
-                                    const layer = createLayerFromNode(node);
+                                    const layer = createLayerFromNode(node, genLayers);
                                     addLayer(layer, player);
                                     player.tabs.push(layer.id);
 
                                     node.position = {
-                                        x: builder.position.x - 50 * linked.length + 100 * i + 50,
+                                        x: builder.position.x - 100 * linked.length + 200 * i + 100,
                                         y: builder.position.y + 300
                                     };
                                 }
@@ -71,11 +75,13 @@ export const main = createLayer("main", function (this: BaseLayer) {
                                     const state = node.state as LayerState;
                                     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                                     const layerId = state.layerId!;
-                                    removeLayer(getLayer(layerId));
+                                    const layer = getLayer(layerId) as CraftedLayer;
+                                    layer?.autoHooks?.forEach(u => u());
+                                    removeLayer(layer);
                                     delete player.layers[layerId];
                                     const index = player.tabs.indexOf(layerId);
-                                    player.tabs.splice(index, 1);
-                                    state.layerId = null;
+                                    if (index != -1) player.tabs.splice(index, 1);
+                                    delete state.layerId;
                                 }
                             }
                         },
@@ -85,6 +91,7 @@ export const main = createLayer("main", function (this: BaseLayer) {
                     }
                 ],
                 canAccept: (t, other) => {
+                    if (other.type != "layer") return false;
                     return !(t.state as BuilderState).active;
                 },
                 draggable: false,
@@ -92,7 +99,8 @@ export const main = createLayer("main", function (this: BaseLayer) {
                     const linked = (t.state as BuilderState).linked;
                     if (linked.includes(other.id)) {
                         // removal
-                        linked.splice(linked.indexOf(other.id), 1);
+                        const index = linked.indexOf(other.id);
+                        if (index > -1) linked.splice(index, 1);
                     } else {
                         // insertion
                         linked.push(other.id);
@@ -104,24 +112,19 @@ export const main = createLayer("main", function (this: BaseLayer) {
             },
             layer: {
                 draggable: t => {
-                    return (t.state as LayerState).layerId === null;
+                    return (t.state as LayerState).layerId === undefined;
                 },
-                onClick: t => {
-                    const id = (t.state as LayerState).layerId;
-                    if (id != null) {
-                        if (player.tabs.includes(id)) {
-                            const index = player.tabs.lastIndexOf(id);
-                            player.tabs.splice(index, 1);
-                        } else {
-                            player.tabs.push(id);
-                        }
-                    }
-                },
-                shape: Shape.Circle,
+                shape: Shape.ChainStart,
                 size: 50,
                 title: node => {
                     return (node.state as LayerState).type;
                 }
+            },
+            part: {
+                draggable: true,
+                shape: Shape.ChainBody,
+                size: 50,
+                title: ""
             }
         },
         startNodes: () => [
@@ -138,7 +141,32 @@ export const main = createLayer("main", function (this: BaseLayer) {
                 type: "layer",
                 state: {
                     type: "cascade",
-                    layerId: null
+                    parts: []
+                }
+            },
+            {
+                position: { x: 200, y: 100 },
+                type: "layer",
+                state: {
+                    type: "cascade",
+                    parts: [
+                        {
+                            type: "size",
+                            stars: 1
+                        },
+                        {
+                            type: "repeatable",
+                            stars: 1
+                        }
+                    ]
+                }
+            },
+            {
+                position: { x: 300, y: 100 },
+                type: "part",
+                state: {
+                    type: "size",
+                    stars: 1
                 }
             }
         ]
@@ -163,15 +191,21 @@ export const main = createLayer("main", function (this: BaseLayer) {
     };
 });
 
-function createLayerFromNode(node: BoardNode): GenericLayer {
+function createLayerFromNode(node: BoardNode, layers: CraftedLayer[]): CraftedLayer {
     const state = node.state as LayerState;
-    const layer = createCascade({
-        position: 0,
+    const layerData = {
+        position: layers.length,
         size: 0,
         upgrade: 0,
-        repeatable: 0
+        repeatable: 0,
+        layers
+    };
+    state.parts.forEach(p => {
+        layerData[p.type] += p.stars;
     });
+    const layer = createCascade(layerData);
     state.layerId = layer.id;
+    layers.push(layer);
     return layer;
 }
 
@@ -184,15 +218,16 @@ export const getInitialLayers = (
     player: Partial<Player>
 ): Array<GenericLayer> => {
     const layers: GenericLayer[] = [main];
+    const genLayers: CraftedLayer[] = [];
     (player.layers?.main as LayerData<typeof main>)?.board?.state?.nodes
         ?.filter(node => node?.type == "layer")
         .forEach(node => {
             const state = node.state as LayerState;
             if (state.layerId != null) {
-                const layer = createLayerFromNode(node);
-                layers.push(layer);
+                createLayerFromNode(node, genLayers);
             }
         });
+    layers.push(...genLayers);
     return layers;
 };
 
